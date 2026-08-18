@@ -1,246 +1,214 @@
 /*
   Simple DirectMedia Layer
-  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
-
-  This software is provided 'as-is', without any express or implied
-  warranty.  In no event will the authors be held liable for any damages
-  arising from the use of this software.
-
-  Permission is granted to anyone to use this software for any purpose,
-  including commercial applications, and to alter it and redistribute it
-  freely, subject to the following restrictions:
-
-  1. The origin of this software must not be misrepresented; you must not
-     claim that you wrote the original software. If you use this software
-     in a product, an acknowledgment in the product documentation would be
-     appreciated but is not required.
-  2. Altered source versions must be plainly marked as such, and must not be
-     misrepresented as being the original software.
-  3. This notice may not be removed or altered from any source distribution.
+  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
 */
 
-#include "SDL_ps5osmesa.h"
+#include "SDL_internal.h"
 
 #ifdef SDL_VIDEO_OPENGL_OSMESA
 
-#include <SDL2/SDL_opengl.h>
-#include <dlfcn.h>
+#include <SDL3/SDL_opengl.h>
+
+#include "SDL_ps5osmesa.h"
 
 #ifndef OSMESA_Y_UP
 #define OSMESA_Y_UP 0x11
 #endif
+#define OSMESA_FORMAT 0x22
+#define OSMESA_DEPTH_BITS 0x30
+#define OSMESA_STENCIL_BITS 0x31
+#define OSMESA_PROFILE 0x33
+#define OSMESA_CORE_PROFILE 0x34
+#define OSMESA_COMPAT_PROFILE 0x35
+#define OSMESA_CONTEXT_MAJOR_VERSION 0x36
+#define OSMESA_CONTEXT_MINOR_VERSION 0x37
 
-#define DEFAULT_OSMESA "libOSMesa.so.8"
-
-struct SDL_GLDriverData
-{
-    void* (*OSMesaGetProcAddress)(const char*);
-    void* (*OSMesaCreateContext)(GLenum, void*);
+typedef struct SDL_GLDriverData {
+    void *(*OSMesaGetProcAddress)(const char *);
+    void *(*OSMesaCreateContext)(GLenum, void *);
+    void *(*OSMesaCreateContextAttribs)(const int *, void *);
+    void (*OSMesaDestroyContext)(void *);
+    GLboolean (*OSMesaMakeCurrent)(void *, void *, GLenum, GLsizei, GLsizei);
     void (*OSMesaPixelStore)(GLint, GLint);
-    void (*OSMesaPostprocess)(void*, const char*, unsigned);
-    void (*OSMesaDestroyContext)(void*);
-    GLboolean (*OSMesaMakeCurrent)(void* , void*, GLenum, GLsizei, GLsizei);
-    GLboolean (*OSMesaGetColorBuffer)(void*, GLint*, GLint*, GLint*, void**);
     void (*OSMesaFlush)(void);
-};
+} SDL_GLDriverData;
 
-static int OSMesa_LoadLibrary(_THIS, const char *path)
+static void PS5_OSMesa_UnloadLibrary(SDL_VideoDevice *_this);
+
+static bool PS5_OSMesa_LoadLibrary(SDL_VideoDevice *_this, const char *path)
 {
-    static int buffer = 0;
-    void* handle;
-    void* ctx;
+    static Uint32 dummy_pixel;
+    SDL_GLDriverData *data;
+    SDL_SharedObject *handle;
+    void *dummy_context;
 
     if (_this->gl_data) {
-        return SDL_SetError("OSMesa library already loaded");
+        return SDL_SetError("OSMesa library already loaded") == 0;
     }
-
-    path = DEFAULT_OSMESA;
-    handle = _this->gl_config.dll_handle = dlopen(path, RTLD_LAZY);
+    if (!path || !*path) {
+        path = "libOSMesa.so.8";
+    }
+    handle = SDL_LoadObject(path);
     if (!handle) {
-      return SDL_SetError("%s: %s", path, dlerror());
+        handle = SDL_LoadObject("libOSMesa.so");
+    }
+    if (!handle) {
+        return SDL_SetError("unable to load %s", path) == 0;
     }
 
-    SDL_strlcpy(_this->gl_config.driver_path, path,
-                SDL_arraysize(_this->gl_config.driver_path));
-
-    _this->gl_data = SDL_calloc(1, sizeof(struct SDL_GLDriverData));
-    if (!_this->gl_data) {
+    data = (SDL_GLDriverData *)SDL_calloc(1, sizeof(*data));
+    if (!data) {
+        SDL_UnloadObject(handle);
         return SDL_OutOfMemory();
     }
-
-    _this->gl_data->OSMesaGetProcAddress = dlsym(handle, "OSMesaGetProcAddress");
-    if (!_this->gl_data->OSMesaGetProcAddress) {
-        return SDL_SetError("%s", dlerror());
+#define PS5_OSMESA_LOAD(name) \
+    data->name = (void *)SDL_LoadFunction(handle, #name); \
+    if (!data->name) { SDL_free(data); SDL_UnloadObject(handle); return SDL_SetError("missing OSMesa symbol %s", #name) == 0; }
+    PS5_OSMESA_LOAD(OSMesaGetProcAddress)
+    PS5_OSMESA_LOAD(OSMesaCreateContext)
+    PS5_OSMESA_LOAD(OSMesaDestroyContext)
+    PS5_OSMESA_LOAD(OSMesaMakeCurrent)
+    PS5_OSMESA_LOAD(OSMesaPixelStore)
+#undef PS5_OSMESA_LOAD
+    data->OSMesaCreateContextAttribs = (void *)SDL_LoadFunction(handle, "OSMesaCreateContextAttribs");
+    data->OSMesaFlush = (void (*)(void))data->OSMesaGetProcAddress("glFlush");
+    if (!data->OSMesaFlush) {
+        SDL_free(data);
+        SDL_UnloadObject(handle);
+        return SDL_SetError("missing OSMesa glFlush") == 0;
     }
 
-    _this->gl_data->OSMesaCreateContext = dlsym(handle, "OSMesaCreateContext");
-    if (!_this->gl_data->OSMesaCreateContext) {
-        return SDL_SetError("%s", dlerror());
-    }
+    _this->gl_config.dll_handle = handle;
+    SDL_strlcpy(_this->gl_config.driver_path, path, sizeof(_this->gl_config.driver_path));
+    _this->gl_data = data;
 
-    _this->gl_data->OSMesaDestroyContext = dlsym(handle, "OSMesaDestroyContext");
-    if (!_this->gl_data->OSMesaDestroyContext) {
-        return SDL_SetError("%s", dlerror());
+    dummy_context = data->OSMesaCreateContext(GL_RGBA, NULL);
+    if (!dummy_context || !data->OSMesaMakeCurrent(dummy_context, &dummy_pixel,
+                                                     GL_UNSIGNED_BYTE, 1, 1)) {
+        if (dummy_context) {
+            data->OSMesaDestroyContext(dummy_context);
+        }
+        PS5_OSMesa_UnloadLibrary(_this);
+        return SDL_SetError("unable to initialize OSMesa") == 0;
     }
-
-    _this->gl_data->OSMesaGetColorBuffer = dlsym(handle, "OSMesaGetColorBuffer");
-    if (!_this->gl_data->OSMesaGetColorBuffer) {
-        return SDL_SetError("%s", dlerror());
-    }
-
-    _this->gl_data->OSMesaMakeCurrent = dlsym(handle, "OSMesaMakeCurrent");
-    if (!_this->gl_data->OSMesaMakeCurrent) {
-        return SDL_SetError("%s", dlerror());
-    }
-
-    _this->gl_data->OSMesaPixelStore = dlsym(handle, "OSMesaPixelStore");
-    if (!_this->gl_data->OSMesaPixelStore) {
-        return SDL_SetError("%s", dlerror());
-    }
-
-    _this->gl_data->OSMesaFlush = _this->gl_data->OSMesaGetProcAddress("glFlush");
-    if (!_this->gl_data->OSMesaFlush) {
-        return SDL_SetError("%s", dlerror());
-    }
-
-    // Create a minimal dummy context so glGetString can be invoked without
-    // having to set a real context.
-    ctx = _this->gl_data->OSMesaCreateContext(GL_RGBA, NULL);
-    if (!ctx) {
-        return SDL_SetError("Failed to create dummy context");
-    }
-    if (!_this->gl_data->OSMesaMakeCurrent(ctx, &buffer, GL_UNSIGNED_BYTE, 1, 1)) {
-        return SDL_SetError("Failed to make dummy context current");
-    }
-
-    return 0;
+    data->OSMesaDestroyContext(dummy_context);
+    return true;
 }
 
-static void OSMesa_UnloadLibrary(_THIS)
+static void PS5_OSMesa_UnloadLibrary(SDL_VideoDevice *_this)
 {
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    if (data) {
+        SDL_free(data);
+        _this->gl_data = NULL;
+    }
     if (_this->gl_config.dll_handle) {
-        dlclose(_this->gl_config.dll_handle);
-	_this->gl_config.dll_handle = NULL;
-    }
-
-    if (_this->gl_data) {
-      SDL_free(_this->gl_data);
-      _this->gl_data = NULL;
+        SDL_UnloadObject(_this->gl_config.dll_handle);
+        _this->gl_config.dll_handle = NULL;
     }
 }
 
-static void* OSMesa_GetProcAddress(_THIS, const char *proc)
+static SDL_FunctionPointer PS5_OSMesa_GetProcAddress(SDL_VideoDevice *_this, const char *proc)
 {
-    if (_this->gl_data) {
-        return _this->gl_data->OSMesaGetProcAddress(proc);
-    }
-    return NULL;
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    return data ? (SDL_FunctionPointer)data->OSMesaGetProcAddress(proc) : NULL;
 }
 
-static int OSMesa_MakeCurrent(_THIS, SDL_Window * window, SDL_GLContext context)
+static bool PS5_OSMesa_MakeCurrent(SDL_VideoDevice *_this, SDL_Window *window, SDL_GLContext context)
 {
-    SDL_Surface* surface = SDL_GetWindowSurface(window);
-
-    if (!_this->gl_data) {
-        return SDL_SetError("OSMesa is not loaded");
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    SDL_Surface *surface = SDL_GetWindowSurface(window);
+    if (!data || !surface) {
+        return SDL_SetError("OSMesa framebuffer is not available") == 0;
     }
-    if (!surface) {
-        return SDL_SetError("Couldn't find surface for window");
+    if (!data->OSMesaMakeCurrent(context, surface->pixels, GL_UNSIGNED_BYTE,
+                                 surface->w, surface->h)) {
+        return SDL_SetError("OSMesaMakeCurrent failed") == 0;
     }
-
-    if (!_this->gl_data->OSMesaMakeCurrent(context, surface->pixels, GL_UNSIGNED_BYTE,
-					   surface->w, surface->h)) {
-        return SDL_SetError("Failed to make context current");
-    }
-
-    _this->gl_data->OSMesaPixelStore(OSMESA_Y_UP, 0);
-
-    return 0;
+    data->OSMesaPixelStore(OSMESA_Y_UP, 0);
+    return true;
 }
 
-static void OSMesa_DeleteContext(_THIS, SDL_GLContext ctx)
+static SDL_GLContext PS5_OSMesa_CreateContext(SDL_VideoDevice *_this, SDL_Window *window)
 {
-    if (_this->gl_data && ctx) {
-        _this->gl_data->OSMesaDestroyContext(ctx);
-    }
-}
-
-static SDL_GLContext OSMesa_CreateContext(_THIS, SDL_Window * window)
-{
-    void* ctx_share;
-    void* ctx;
-
-    if (!_this->gl_data) {
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    void *context = NULL;
+    (void)window;
+    if (!data) {
         SDL_SetError("OSMesa is not loaded");
-	return NULL;
-    }
-
-    if (_this->gl_config.share_with_current_context) {
-        ctx_share = SDL_GL_GetCurrentContext();
-    } else {
-        ctx_share = NULL;
-    }
-
-    ctx = _this->gl_data->OSMesaCreateContext(GL_RGBA, ctx_share);
-    if (!ctx) {
-        SDL_SetError("Failed to create context");
         return NULL;
     }
-
-    if (OSMesa_MakeCurrent(_this, window, ctx) < 0) {
-        OSMesa_DeleteContext(_this, ctx);
+    if (data->OSMesaCreateContextAttribs) {
+        const int profile = (_this->gl_config.profile_mask & SDL_GL_CONTEXT_PROFILE_CORE) ?
+            OSMESA_CORE_PROFILE : OSMESA_COMPAT_PROFILE;
+        const int attribs[] = {
+            OSMESA_FORMAT, GL_RGBA,
+            OSMESA_PROFILE, profile,
+            OSMESA_CONTEXT_MAJOR_VERSION, _this->gl_config.major_version > 0 ? _this->gl_config.major_version : 3,
+            OSMESA_CONTEXT_MINOR_VERSION, _this->gl_config.minor_version,
+            OSMESA_DEPTH_BITS, _this->gl_config.depth_size,
+            OSMESA_STENCIL_BITS, _this->gl_config.stencil_size,
+            0
+        };
+        context = data->OSMesaCreateContextAttribs(attribs, NULL);
+    }
+    if (!context) {
+        context = data->OSMesaCreateContext(GL_RGBA, NULL);
+    }
+    if (!context || !PS5_OSMesa_MakeCurrent(_this, window, context)) {
+        if (context) {
+            data->OSMesaDestroyContext(context);
+        }
         return NULL;
     }
-
-    return (SDL_GLContext)ctx;
+    return (SDL_GLContext)context;
 }
 
-static int OSMesa_SetSwapInterval(_THIS, int interval)
+static bool PS5_OSMesa_SetSwapInterval(SDL_VideoDevice *_this, int interval)
 {
-    return 0;
+    (void)_this;
+    (void)interval;
+    return true;
 }
 
-static int OSMesa_GetSwapInterval(_THIS)
+static bool PS5_OSMesa_GetSwapInterval(SDL_VideoDevice *_this, int *interval)
 {
-    return 0;
+    (void)_this;
+    *interval = 0;
+    return true;
 }
 
-static int OSMesa_SwapWindow(_THIS, SDL_Window *window)
+static bool PS5_OSMesa_SwapWindow(SDL_VideoDevice *_this, SDL_Window *window)
 {
-    SDL_Surface *surface;
-
-    if (!_this->gl_data) {
-        return SDL_SetError("OSMesa is not loaded");
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    if (!data) {
+        return SDL_SetError("OSMesa is not loaded") == 0;
     }
-
-    _this->gl_data->OSMesaFlush();
-
-    surface = SDL_GetWindowSurface(window);
-    if (!surface) {
-        return SDL_SetError("Failed to get SDL window surface");
-    }
-
-    if (SDL_UpdateWindowSurface(window) != 0) {
-        return SDL_SetError("Failed to update window surface");
-    }
-
-    return 0;
+    data->OSMesaFlush();
+    return SDL_UpdateWindowSurface(window);
 }
 
-
-int PS5_OSMesa_InitDevice(SDL_VideoDevice* device)
+static bool PS5_OSMesa_DestroyContext(SDL_VideoDevice *_this, SDL_GLContext context)
 {
-    device->GL_LoadLibrary = OSMesa_LoadLibrary;
-    device->GL_GetProcAddress = OSMesa_GetProcAddress;
-    device->GL_UnloadLibrary = OSMesa_UnloadLibrary;
-    device->GL_CreateContext = OSMesa_CreateContext;
-    device->GL_MakeCurrent = OSMesa_MakeCurrent;
-    device->GL_SetSwapInterval = OSMesa_SetSwapInterval;
-    device->GL_GetSwapInterval = OSMesa_GetSwapInterval;
-    device->GL_SwapWindow = OSMesa_SwapWindow;
-    device->GL_DeleteContext = OSMesa_DeleteContext;
+    SDL_GLDriverData *data = (SDL_GLDriverData *)_this->gl_data;
+    if (data && context) {
+        data->OSMesaDestroyContext(context);
+    }
+    return true;
+}
 
+int PS5_OSMesa_InitDevice(SDL_VideoDevice *device)
+{
+    device->GL_LoadLibrary = PS5_OSMesa_LoadLibrary;
+    device->GL_GetProcAddress = PS5_OSMesa_GetProcAddress;
+    device->GL_UnloadLibrary = PS5_OSMesa_UnloadLibrary;
+    device->GL_CreateContext = PS5_OSMesa_CreateContext;
+    device->GL_MakeCurrent = PS5_OSMesa_MakeCurrent;
+    device->GL_SetSwapInterval = PS5_OSMesa_SetSwapInterval;
+    device->GL_GetSwapInterval = PS5_OSMesa_GetSwapInterval;
+    device->GL_SwapWindow = PS5_OSMesa_SwapWindow;
+    device->GL_DestroyContext = PS5_OSMesa_DestroyContext;
     return 0;
 }
 
-#endif
+#endif /* SDL_VIDEO_OPENGL_OSMESA */

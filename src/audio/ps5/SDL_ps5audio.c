@@ -1,6 +1,6 @@
 /*
   Simple DirectMedia Layer
-  Copyright (C) 1997-2015 Sam Lantinga <slouken@libsdl.org>
+  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
 
   This software is provided 'as-is', without any express or implied
   warranty.  In no event will the authors be held liable for any damages
@@ -18,139 +18,141 @@
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 */
-#include "../../SDL_internal.h"
+
+#include "SDL_internal.h"
 
 #ifdef SDL_AUDIO_DRIVER_PS5
 
-#include "SDL_audio.h"
+#include "../SDL_audiodev_c.h"
+#include "../SDL_sysaudio.h"
 #include "SDL_ps5audio.h"
 
-
-inline static Uint16 PS5AUDIO_SampleSize(Uint16 size)
+static int PS5AUDIO_SampleFrames(const int requested)
 {
-    if (size >= 2048) return 2048;
-    if (size >= 1792) return 1792;
-    if (size >= 1536) return 1536;
-    if (size >= 1280) return 1280;
-    if (size >= 1024) return 1024;
-    if (size >= 768) return 768;
-    if (size >= 512) return 512;
+    if (requested >= 2048) return 2048;
+    if (requested >= 1792) return 1792;
+    if (requested >= 1536) return 1536;
+    if (requested >= 1280) return 1280;
+    if (requested >= 1024) return 1024;
+    if (requested >= 768) return 768;
+    if (requested >= 512) return 512;
     return 256;
 }
 
-static int PS5AUDIO_OpenDevice(_THIS, const char *devname)
+static bool PS5AUDIO_OpenDevice(SDL_AudioDevice *device)
 {
-    SDL_AudioFormat test_format;
-    Uint8 fmt;
+    const SDL_AudioFormat *formats;
+    SDL_AudioFormat format = 0;
+    Uint8 hardware_format;
 
-    this->hidden = (struct SDL_PrivateAudioData *) SDL_calloc(1, sizeof(*this->hidden));
-    if (this->hidden == NULL) {
+    device->hidden = (struct SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*device->hidden));
+    if (!device->hidden) {
+        return false;
+    }
+
+    formats = SDL_ClosestAudioFormats(device->spec.format);
+    while (*formats) {
+        if (*formats == SDL_AUDIO_S16LE || *formats == SDL_AUDIO_F32LE) {
+            format = *formats;
+            break;
+        }
+        ++formats;
+    }
+    if (!format) {
+        return SDL_SetError("PS5 audio does not support the requested format");
+    }
+
+    device->spec.format = format;
+    device->sample_frames = PS5AUDIO_SampleFrames(device->sample_frames);
+    device->spec.freq = 48000;
+    device->spec.channels = (device->spec.channels == 1) ? 1 : 2;
+
+    if (format == SDL_AUDIO_S16LE) {
+        hardware_format = (device->spec.channels == 1) ?
+            PROSPERO_AUDIO_OUT_PARAM_FORMAT_S16_MONO :
+            PROSPERO_AUDIO_OUT_PARAM_FORMAT_S16_STEREO;
+    } else {
+        hardware_format = (device->spec.channels == 1) ?
+            PROSPERO_AUDIO_OUT_PARAM_FORMAT_FLOAT_MONO :
+            PROSPERO_AUDIO_OUT_PARAM_FORMAT_FLOAT_STEREO;
+    }
+
+    SDL_UpdatedAudioDeviceFormat(device);
+    device->hidden->handle = sceAudioOutOpen(
+        PROSPERO_USER_SERVICE_USER_ID_SYSTEM,
+        PROSPERO_AUDIO_OUT_PORT_TYPE_MAIN,
+        0, device->sample_frames, device->spec.freq, hardware_format);
+    if (device->hidden->handle < 0) {
+        const int error = device->hidden->handle;
+        SDL_free(device->hidden);
+        device->hidden = NULL;
+        return SDL_SetError("sceAudioOutOpen failed: 0x%08x", (unsigned int)error) == 0;
+    }
+
+    device->hidden->mixlen = device->buffer_size;
+    device->hidden->mixbuf = (Uint8 *)SDL_calloc(1, device->hidden->mixlen);
+    if (!device->hidden->mixbuf) {
+        sceAudioOutClose(device->hidden->handle);
+        device->hidden->handle = -1;
+        SDL_free(device->hidden);
+        device->hidden = NULL;
         return SDL_OutOfMemory();
     }
+    SDL_memset(device->hidden->mixbuf, device->silence_value, device->hidden->mixlen);
+    return true;
+}
 
-    for (test_format = SDL_FirstAudioFormat(this->spec.format); test_format; test_format = SDL_NextAudioFormat()) {
-        if (test_format == AUDIO_S16LSB) {
-            fmt = (this->spec.channels == 1) ? PROSPERO_AUDIO_OUT_PARAM_FORMAT_S16_MONO
-                                             : PROSPERO_AUDIO_OUT_PARAM_FORMAT_S16_STEREO;
-        } else if (test_format == AUDIO_F32LSB) {
-            fmt = (this->spec.channels == 1) ? PROSPERO_AUDIO_OUT_PARAM_FORMAT_FLOAT_MONO
-                                             : PROSPERO_AUDIO_OUT_PARAM_FORMAT_FLOAT_STEREO;
-        } else {
-            continue;
-        }
-        break;
+static bool PS5AUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buflen)
+{
+    (void)buffer;
+    (void)buflen;
+    return sceAudioOutOutput(device->hidden->handle, device->hidden->mixbuf) >= 0;
+}
+
+static bool PS5AUDIO_WaitDevice(SDL_AudioDevice *device)
+{
+    (void)device;
+    return true;  /* sceAudioOutOutput() blocks until the fragment is accepted. */
+}
+
+static Uint8 *PS5AUDIO_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
+{
+    *buffer_size = device->hidden->mixlen;
+    return device->hidden->mixbuf;
+}
+
+static void PS5AUDIO_CloseDevice(SDL_AudioDevice *device)
+{
+    if (!device->hidden) {
+        return;
+    }
+    if (device->hidden->handle >= 0) {
+        sceAudioOutClose(device->hidden->handle);
+        device->hidden->handle = -1;
+    }
+    SDL_free(device->hidden->mixbuf);
+    SDL_free(device->hidden);
+    device->hidden = NULL;
+}
+
+static bool PS5AUDIO_Init(SDL_AudioDriverImpl *impl)
+{
+    if (sceAudioOutInit() != 0) {
+        SDL_SetError("sceAudioOutInit failed");
+        return false;
     }
 
-    if (!test_format) {
-        return SDL_SetError("%s: Unsupported audio format", "ps5");
-    }
-
-    this->spec.format = test_format;
-    this->spec.samples = PS5AUDIO_SampleSize(this->spec.samples);
-    this->spec.freq = 48000;
-    this->spec.channels = this->spec.channels == 1 ? 1 : 2;
-
-    /* Update the fragment size as size in bytes. */
-    SDL_CalculateAudioSpec(&this->spec);
-
-    this->hidden->handle = sceAudioOutOpen(PROSPERO_USER_SERVICE_USER_ID_SYSTEM,
-					   PROSPERO_AUDIO_OUT_PORT_TYPE_MAIN,
-					   0, this->spec.samples, 48000, fmt);
-    if (this->hidden->handle < 1) {
-        return SDL_SetError("sceAudioOutOpen: %s", strerror(this->hidden->handle));
-    }
-
-    this->hidden->mixlen = this->spec.size;
-    this->hidden->mixbuf = (Uint8 *)SDL_calloc(1, this->hidden->mixlen);
-
-    return 0;
-}
-
-static void PS5AUDIO_PlayDevice(_THIS)
-{
-    sceAudioOutOutput(this->hidden->handle, this->hidden->mixbuf);
-}
-
-static void PS5AUDIO_WaitDevice(_THIS)
-{
-  // NOP, sceAudioOutOutput() is blocking
-}
-
-static Uint8 *PS5AUDIO_GetDeviceBuf(_THIS)
-{
-    return this->hidden->mixbuf;
-}
-
-static void PS5AUDIO_CloseDevice(_THIS)
-{
-    int res;
-    if (this->hidden->handle > 0) {
-        res = sceAudioOutClose(this->hidden->handle);
-        if (res != 0) {
-            SDL_SetError("sceAudioOutClose: %s", strerror(res));
-        }
-        this->hidden->handle = -1;
-    }
-
-    if (this->hidden->mixbuf) {
-        free(this->hidden->mixbuf);
-        this->hidden->mixbuf = 0;
-    }
-}
-
-static void PS5AUDIO_ThreadInit(_THIS)
-{
-}
-
-static void PS5AUDIO_Deinitialize(void)
-{
-}
-
-static SDL_bool PS5AUDIO_Init(SDL_AudioDriverImpl *impl)
-{
-    static SDL_bool need_init = SDL_TRUE;
-
-    if (need_init && sceAudioOutInit()) {
-        return SDL_FALSE;
-    }
-
-    need_init = SDL_FALSE;
-
-    impl->ThreadInit = PS5AUDIO_ThreadInit;
     impl->OpenDevice = PS5AUDIO_OpenDevice;
     impl->PlayDevice = PS5AUDIO_PlayDevice;
     impl->WaitDevice = PS5AUDIO_WaitDevice;
     impl->GetDeviceBuf = PS5AUDIO_GetDeviceBuf;
     impl->CloseDevice = PS5AUDIO_CloseDevice;
-    impl->Deinitialize = PS5AUDIO_Deinitialize;
-
-    impl->OnlyHasDefaultOutputDevice = SDL_TRUE;
-
-    return SDL_TRUE;
+    impl->OnlyHasDefaultPlaybackDevice = true;
+    return true;
 }
 
-AudioBootStrap PS5AUDIO_bootstrap = { "ps5", "PS5 audio driver", PS5AUDIO_Init, SDL_FALSE };
+AudioBootStrap PS5AUDIO_bootstrap = {
+    "ps5", "PS5 SceAudioOut audio driver", PS5AUDIO_Init, false, false
+};
 
 #endif /* SDL_AUDIO_DRIVER_PS5 */
-
-/* vi: set ts=4 sw=4 expandtab: */

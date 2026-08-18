@@ -291,6 +291,7 @@
 #cmakedefine SDL_AUDIO_DRIVER_WASAPI 1
 #cmakedefine SDL_AUDIO_DRIVER_VITA 1
 #cmakedefine SDL_AUDIO_DRIVER_PSP 1
+#cmakedefine SDL_AUDIO_DRIVER_PS5 1
 #cmakedefine SDL_AUDIO_DRIVER_PS2 1
 #cmakedefine SDL_AUDIO_DRIVER_N3DS 1
 #cmakedefine SDL_AUDIO_DRIVER_NGAGE 1
@@ -318,6 +319,7 @@
 #cmakedefine SDL_JOYSTICK_N3DS 1
 #cmakedefine SDL_JOYSTICK_PS2 1
 #cmakedefine SDL_JOYSTICK_PSP 1
+#cmakedefine SDL_JOYSTICK_PS5 1
 #cmakedefine SDL_JOYSTICK_RAWINPUT 1
 #cmakedefine SDL_JOYSTICK_USBHID 1
 #cmakedefine SDL_JOYSTICK_VIRTUAL 1
@@ -415,6 +417,8 @@
 #cmakedefine SDL_VIDEO_DRIVER_OFFSCREEN 1
 #cmakedefine SDL_VIDEO_DRIVER_PS2 1
 #cmakedefine SDL_VIDEO_DRIVER_PSP 1
+#cmakedefine SDL_VIDEO_DRIVER_PS5 1
+#cmakedefine SDL_VIDEO_OPENGL_OSMESA 1
 #cmakedefine SDL_VIDEO_DRIVER_RISCOS 1
 #cmakedefine SDL_VIDEO_DRIVER_ROCKCHIP 1
 #cmakedefine SDL_VIDEO_DRIVER_RPI 1
@@ -526,6 +530,7 @@
 #cmakedefine SDL_FILESYSTEM_EMSCRIPTEN 1
 #cmakedefine SDL_FILESYSTEM_VITA 1
 #cmakedefine SDL_FILESYSTEM_PSP 1
+#cmakedefine SDL_FILESYSTEM_PS5 1
 #cmakedefine SDL_FILESYSTEM_PS2 1
 #cmakedefine SDL_FILESYSTEM_N3DS 1
 #cmakedefine SDL_FILESYSTEM_DOS 1

@@ -58,7 +58,16 @@
 #define SDL_PLATFORM_BSDI 1
 #endif
 
-#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
+#if defined(__PS5__) || defined(__PROSPERO__)
+
+/**
+ * A preprocessor macro that is only defined if compiling for Sony
+ * PlayStation 5.
+ */
+#define SDL_PLATFORM_PS5 1
+#endif
+
+#if (defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)) && !defined(SDL_PLATFORM_PS5)
 
 /**
  * A preprocessor macro that is only defined if compiling for FreeBSD.

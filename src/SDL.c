@@ -833,6 +833,8 @@ const char *SDL_GetPlatform(void)
     return "PlayStation 2";
 #elif defined(SDL_PLATFORM_PSP)
     return "PlayStation Portable";
+#elif defined(SDL_PLATFORM_PS5)
+    return "PlayStation 5";
 #elif defined(SDL_PLATFORM_VITA)
     return "PlayStation Vita";
 #elif defined(SDL_PLATFORM_3DS)
@@ -870,7 +872,7 @@ SDL_FormFactor SDL_GetDeviceFormFactor(void)
 #elif defined(SDL_PLATFORM_IOS)
     extern SDL_FormFactor SDL_GetUIKitDeviceFormFactor(void);
     return SDL_GetUIKitDeviceFormFactor();
-#elif defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES) || defined(SDL_PLATFORM_PS2)
+#elif defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES) || defined(SDL_PLATFORM_PS2) || defined(SDL_PLATFORM_PS5)
     return SDL_FORMFACTOR_CONSOLE;
 #elif defined(SDL_PLATFORM_PSP) || defined(SDL_PLATFORM_VITA) || defined(SDL_PLATFORM_3DS)
     return SDL_FORMFACTOR_HANDHELD;

@@ -215,7 +215,7 @@ if(EMSCRIPTEN)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
-if(VITA OR PSP OR PS2 OR N3DS OR RISCOS OR NGAGE OR DOS)
+if(VITA OR PSP OR PS2 OR PS5 OR PROSPERO OR N3DS OR RISCOS OR NGAGE OR DOS)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
@@ -1843,6 +1843,84 @@ elseif(EMSCRIPTEN)
 
   CheckPTHREAD()
   CheckLibUnwind()
+
+elseif(PS5 OR PROSPERO)
+  set(SDL_UNIX_CONSOLE_BUILD ON)
+
+  sdl_glob_sources(
+    "${SDL3_SOURCE_DIR}/src/core/unix/*.c"
+    "${SDL3_SOURCE_DIR}/src/core/unix/*.h"
+  )
+
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/misc/ps5/*.c")
+  set(HAVE_SDL_MISC TRUE)
+
+  if(SDL_AUDIO)
+    set(SDL_AUDIO_DRIVER_PS5 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/audio/ps5/*.c"
+      "${SDL3_SOURCE_DIR}/src/audio/ps5/*.h"
+    )
+    set(HAVE_SDL_AUDIO TRUE)
+  endif()
+
+  set(SDL_FILESYSTEM_PS5 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/ps5/*.c")
+  set(HAVE_SDL_FILESYSTEM TRUE)
+
+  set(SDL_FSOPS_POSIX 1)
+  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
+  set(HAVE_SDL_FSOPS TRUE)
+
+  if(SDL_JOYSTICK)
+    set(SDL_JOYSTICK_PS5 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/joystick/ps5/*.c"
+      "${SDL3_SOURCE_DIR}/src/joystick/ps5/*.h"
+    )
+    set(HAVE_SDL_JOYSTICK TRUE)
+  endif()
+
+  set(SDL_TIME_UNIX 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/unix/*.c")
+  set(HAVE_SDL_TIME TRUE)
+
+  set(SDL_TIMER_UNIX 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/unix/*.c")
+  set(HAVE_SDL_TIMERS TRUE)
+
+  if(SDL_CLOCK_GETTIME)
+    set(HAVE_CLOCK_GETTIME 1)
+  endif()
+
+  if(SDL_VIDEO)
+    set(SDL_VIDEO_DRIVER_PS5 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/video/ps5/*.c"
+      "${SDL3_SOURCE_DIR}/src/video/ps5/*.h"
+    )
+    set(HAVE_SDL_VIDEO TRUE)
+
+    if(SDL_OPENGL)
+      set(SDL_VIDEO_OPENGL 1)
+      set(SDL_VIDEO_OPENGL_OSMESA 1)
+      set(SDL_VIDEO_RENDER_OGL 1)
+      set(HAVE_OPENGL TRUE)
+    endif()
+  endif()
+
+  sdl_compile_definitions(PRIVATE "__PS5__" "__PROSPERO__")
+  sdl_link_dependency(ps5
+    LIBS
+      SceAudioOut
+      SceImeDialog
+      SceKeyboard
+      ScePad
+      SceSystemService
+      SceUserService
+      SceVideoOut
+  )
+  CheckPTHREAD()
 
 elseif(UNIX AND NOT (APPLE OR RISCOS OR HAIKU OR CYGWIN))
 

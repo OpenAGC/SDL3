@@ -1,363 +1,236 @@
 /*
   Simple DirectMedia Layer
-  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
-
-  This software is provided 'as-is', without any express or implied
-  warranty.  In no event will the authors be held liable for any damages
-  arising from the use of this software.
-
-  Permission is granted to anyone to use this software for any purpose,
-  including commercial applications, and to alter it and redistribute it
-  freely, subject to the following restrictions:
-
-  1. The origin of this software must not be misrepresented; you must not
-     claim that you wrote the original software. If you use this software
-     in a product, an acknowledgment in the product documentation would be
-     appreciated but is not required.
-  2. Altered source versions must be plainly marked as such, and must not be
-     misrepresented as being the original software.
-  3. This notice may not be removed or altered from any source distribution.
+  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
 */
 
-#include "../../SDL_internal.h"
+#include "SDL_internal.h"
 
 #ifdef SDL_VIDEO_DRIVER_PS5
 
-#include "SDL_error.h"
-#include "SDL_events.h"
-#include "SDL_stdinc.h"
+#include <wchar.h>
 
 #include "../../events/SDL_keyboard_c.h"
-
 #include "SDL_ps5keyboard.h"
 
-typedef struct keyboard_state
-{
-    uint64_t junk0[2];
+typedef struct PS5_KeyboardState {
+    uint64_t reserved0[2];
     uint8_t available;
-    uint32_t junk1[2];
+    uint32_t reserved1[2];
     uint32_t modifiers;
     uint16_t scankey[16];
-    uint64_t junk3[4];
-} keyboard_state_t;
+    uint64_t reserved2[4];
+} PS5_KeyboardState;
 
-typedef enum SceImeDialogStatus
-{
+typedef enum SceImeDialogStatus {
     SCE_IME_DIALOG_STATUS_NONE,
     SCE_IME_DIALOG_STATUS_RUNNING,
     SCE_IME_DIALOG_STATUS_FINISHED
 } SceImeDialogStatus;
 
-typedef int (*SceImeTextFilter)(wchar_t*, uint32_t*, const wchar_t*, uint32_t);
+typedef int (*SceImeTextFilter)(wchar_t *, uint32_t *, const wchar_t *, uint32_t);
 
-typedef struct SceImeDialogParam
-{
+typedef struct SceImeDialogParam {
     int userId;
-    enum {
-    SCE_IME_TYPE_DEFAULT,
-    SCE_IME_TYPE_BASIC_LATIN,
-    SCE_IME_TYPE_URL,
-    SCE_IME_TYPE_MAIL,
-    SCE_IME_TYPE_NUMBER
-    } type;
+    int type;
     uint64_t supportedLanguages;
-    enum {
-    SCE_IME_ENTER_LABEL_DEFAULT,
-    SCE_IME_ENTER_LABEL_SEND,
-    SCE_IME_ENTER_LABEL_SEARCH,
-    SCE_IME_ENTER_LABEL_GO,
-    } enterLabel;
-    enum {
-    SCE_IME_INPUT_METHOD_DEFAULT
-    } inputMethod;
+    int enterLabel;
+    int inputMethod;
     SceImeTextFilter filter;
     uint32_t option;
     uint32_t maxTextLength;
     wchar_t *inputTextBuffer;
     float posx;
     float posy;
-    enum {
-    SCE_IME_HALIGN_LEFT,
-    SCE_IME_HALIGN_CENTER,
-    SCE_IME_HALIGN_RIGHT
-    } halign;
-    enum {
-    SCE_IME_VALIGN_TOP,
-    SCE_IME_VALIGN_CENTER,
-    SCE_IME_VALIGN_BOTTOM
-    } valign;
+    int halign;
+    int valign;
     const wchar_t *placeholder;
     const wchar_t *title;
     int8_t reserved[16];
 } SceImeDialogParam;
 
-typedef struct SceImeDialogResult
-{
-    enum {
-    SCE_IME_DIALOG_END_STATUS_OK,
-    SCE_IME_DIALOG_END_STATUS_USER_CANCELED,
-    SCE_IME_DIALOG_END_STATUS_ABORTED,
-    } outcome;
+typedef struct SceImeDialogResult {
+    int outcome;
     int8_t reserved[12];
 } SceImeDialogResult;
 
+#define SCE_IME_DIALOG_END_STATUS_OK 0
+#define SCE_IME_DIALOG_END_STATUS_USER_CANCELED 1
+#define SCE_IME_DIALOG_END_STATUS_ABORTED 2
 
 int sceKeyboardInit(void);
 int sceKeyboardOpen(int, int, int, void *);
-int sceKeyboardReadState(int, keyboard_state_t *);
+int sceKeyboardReadState(int, PS5_KeyboardState *);
 int sceKeyboardClose(int);
-
 int sceUserServiceInitialize(void *);
 int sceUserServiceGetForegroundUser(int *);
-
-int sceImeDialogInit(const SceImeDialogParam*, void*);
-int sceImeDialogGetResult(SceImeDialogResult*);
+int sceImeDialogInit(const SceImeDialogParam *, void *);
+int sceImeDialogGetResult(SceImeDialogResult *);
 int sceImeDialogTerm(void);
-
 SceImeDialogStatus sceImeDialogGetStatus(void);
 
-
-static int g_keyboard_handle = -1;
-static keyboard_state_t g_prev_keyboard_state = {0};
-
-static SceImeDialogStatus g_ime_dialog_status = SCE_IME_DIALOG_STATUS_NONE;
-static wchar_t g_ime_dialog_title[0x80] = {0};
-static wchar_t g_ime_dialog_text[0x800] = {0};
-
-static SceImeDialogParam g_ime_dialog_param =
-{
-    .title = g_ime_dialog_title,
-    .inputTextBuffer = g_ime_dialog_text,
-    .maxTextLength = sizeof(g_ime_dialog_text) / sizeof(g_ime_dialog_text[0])
+static int keyboard_handle = -1;
+static PS5_KeyboardState previous_state;
+static SceImeDialogStatus ime_status = SCE_IME_DIALOG_STATUS_NONE;
+static wchar_t ime_title[128];
+static wchar_t ime_text[2048];
+static SceImeDialogParam ime_param = {
+    .maxTextLength = SDL_arraysize(ime_text),
+    .inputTextBuffer = ime_text,
+    .title = ime_title
 };
 
-int PS5_Keyboard_Open(void)
+static void PS5_SendKey(SDL_Scancode scancode, bool down)
+{
+    SDL_SendKeyboardKey(0, SDL_GLOBAL_KEYBOARD_ID, 0, scancode, down);
+}
+
+static bool PS5_KeyPresent(const uint16_t keys[16], uint16_t key)
+{
+    for (int i = 0; i < 16; ++i) {
+        if (keys[i] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PS5_Keyboard_Init(void)
+{
+    int error = sceUserServiceInitialize(NULL);
+    if (error != 0 && error != (int)0x80960003) {
+        return SDL_SetError("sceUserServiceInitialize failed: 0x%08x", (unsigned int)error);
+    }
+    error = sceKeyboardInit();
+    if (error != 0) {
+        return SDL_SetError("sceKeyboardInit failed: 0x%08x", (unsigned int)error);
+    }
+    return true;
+}
+
+bool PS5_Keyboard_Open(void)
 {
     int user_id;
-    long junk;
-    int err;
-
-    err = sceUserServiceGetForegroundUser(&user_id);
-    if (err != 0) {
-        return SDL_SetError("sceUserServiceGetForegroundUser: 0x%08x", err);
+    long reserved = 0;
+    int error = sceUserServiceGetForegroundUser(&user_id);
+    if (error != 0) {
+        return SDL_SetError("sceUserServiceGetForegroundUser failed: 0x%08x", (unsigned int)error);
     }
-
-    g_ime_dialog_param.userId = user_id;
-    g_keyboard_handle = sceKeyboardOpen(user_id, 0, 0, &junk);
-    if (g_keyboard_handle <= 0) {
-        return SDL_SetError("sceKeyboardOpen: 0x%08x", g_keyboard_handle);
+    ime_param.userId = user_id;
+    keyboard_handle = sceKeyboardOpen(user_id, 0, 0, &reserved);
+    if (keyboard_handle <= 0) {
+        return SDL_SetError("sceKeyboardOpen failed: 0x%08x", (unsigned int)keyboard_handle);
     }
-
-    return 0;
+    SDL_zero(previous_state);
+    return true;
 }
 
-int PS5_Keyboard_Close(void)
+void PS5_Keyboard_Close(void)
 {
-    int err;
-
-    if (g_keyboard_handle <= 0) {
-        return 0;
+    if (keyboard_handle > 0) {
+        sceKeyboardClose(keyboard_handle);
+        keyboard_handle = -1;
     }
-
-    err = sceKeyboardClose(g_keyboard_handle);
-    if (err != 0) {
-        return SDL_SetError("sceKeyboardClose: 0x%08x", err);
-    }
-
-    return 0;
 }
 
-int PS5_Keyboard_Init(void)
+static void PS5_ImeDialogPumpEvents(void)
 {
-    int err;
+    const SceImeDialogStatus status = sceImeDialogGetStatus();
+    SceImeDialogResult result;
+    char text[4096];
 
-    err = sceUserServiceInitialize(0);
-    if (err != 0 && err != 0x80960003) {
-        return SDL_SetError("sceUserServiceInitialize: 0x%08x", err);
+    if (status == ime_status) {
+        return;
+    }
+    ime_status = status;
+    if (status == SCE_IME_DIALOG_STATUS_RUNNING) {
+        SDL_SendScreenKeyboardShown();
+        return;
+    }
+    if (status != SCE_IME_DIALOG_STATUS_FINISHED) {
+        return;
     }
 
-    err = sceKeyboardInit();
-    if (err != 0) {
-        return SDL_SetError("sceKeyboardInit: 0x%08x", err);
-    }
-
-    return 0;
-}
-
-static int PS5_ImeDialog_PumpEvents(void)
-{
-    SceImeDialogStatus status = sceImeDialogGetStatus();
-    SceImeDialogResult result = {0};
-    char text[0x800];
-
-    if (g_ime_dialog_status == status) {
-        return 0;
-    }
-    g_ime_dialog_status = status;
-
-    switch (status) {
-    case SCE_IME_DIALOG_STATUS_NONE:
-        return 0;
-
-    case SCE_IME_DIALOG_STATUS_RUNNING:
-        return 0;
-
-    case SCE_IME_DIALOG_STATUS_FINISHED:
-        break;
-
-    default:
-        return -1;
-    }
-
-    if (sceImeDialogGetResult(&result)) {
-        return -1;
-    }
-
-    switch (result.outcome) {
-    case SCE_IME_DIALOG_END_STATUS_OK:
-        if (wcstombs(text, g_ime_dialog_text, sizeof(text)) >= 0) {
+    SDL_zero(result);
+    if (sceImeDialogGetResult(&result) == 0 && result.outcome == SCE_IME_DIALOG_END_STATUS_OK) {
+        if (wcstombs(text, ime_text, sizeof(text)) != (size_t)-1) {
+            text[sizeof(text) - 1] = '\0';
             SDL_SendKeyboardText(text);
         }
-        SDL_SendKeyboardKeyAutoRelease(SDL_SCANCODE_RETURN);
-        break;
-
-    case SCE_IME_DIALOG_END_STATUS_USER_CANCELED:
-    case SCE_IME_DIALOG_END_STATUS_ABORTED:
-        break;
-    default:
-        return -1;
+        SDL_SendKeyboardKeyAutoRelease(0, SDL_SCANCODE_RETURN);
     }
-
     sceImeDialogTerm();
-
-    return 0;
+    ime_status = SCE_IME_DIALOG_STATUS_NONE;
+    SDL_SendScreenKeyboardHidden();
 }
 
-int PS5_Keyboard_PumpEvents(void)
+void PS5_Keyboard_PumpEvents(void)
 {
-    keyboard_state_t curr;
-    uint32_t diff;
-    int err;
+    static const struct {
+        uint32_t mask;
+        SDL_Scancode scancode;
+    } modifiers[] = {
+        { 0x01, SDL_SCANCODE_LCTRL }, { 0x02, SDL_SCANCODE_LSHIFT },
+        { 0x04, SDL_SCANCODE_LALT },  { 0x08, SDL_SCANCODE_LGUI },
+        { 0x10, SDL_SCANCODE_RCTRL }, { 0x20, SDL_SCANCODE_RSHIFT },
+        { 0x40, SDL_SCANCODE_RALT },  { 0x80, SDL_SCANCODE_RGUI }
+    };
+    PS5_KeyboardState current;
+    uint32_t changed;
 
-    PS5_ImeDialog_PumpEvents();
-
-    if (g_keyboard_handle <= 0) {
-        return 0;
+    PS5_ImeDialogPumpEvents();
+    if (keyboard_handle <= 0) {
+        return;
+    }
+    SDL_zero(current);
+    if (sceKeyboardReadState(keyboard_handle, &current) != 0 || !current.available) {
+        return;
     }
 
-    err = sceKeyboardReadState(g_keyboard_handle, &curr);
-    if (err != 0) {
-        return SDL_SetError("sceKeyboardReadState: 0x%08x", err);
-    }
-
-    if (!curr.available) {
-        return 0;
-    }
-
-    diff = g_prev_keyboard_state.modifiers ^ curr.modifiers;
-    if (diff) {
-        if (diff & 0x01) {
-            if (g_prev_keyboard_state.modifiers & 0x01) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LCTRL);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LCTRL);
-            }
-        }
-        if (diff & 0x02) {
-            if (g_prev_keyboard_state.modifiers & 0x02) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LSHIFT);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LSHIFT);
-            }
-        }
-        if (diff & 0x04) {
-            if (g_prev_keyboard_state.modifiers & 0x04) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LALT);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LALT);
-            }
-        }
-        if (diff & 0x08) {
-            if (g_prev_keyboard_state.modifiers & 0x08) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LGUI);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LGUI);
-            }
-        }
-        if (diff & 0x10) {
-            if (g_prev_keyboard_state.modifiers & 0x10) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RCTRL);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RCTRL);
-            }
-        }
-        if (diff & 0x20) {
-            if (g_prev_keyboard_state.modifiers & 0x20) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RSHIFT);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RSHIFT);
-            }
-        }
-        if (diff & 0x40) {
-            if (g_prev_keyboard_state.modifiers & 0x40) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RALT);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RALT);
-            }
-        }
-        if (diff & 0x80) {
-            if (g_prev_keyboard_state.modifiers & 0x80) {
-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RGUI);
-            } else {
-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RGUI);
-            }
+    changed = previous_state.modifiers ^ current.modifiers;
+    for (int i = 0; i < SDL_arraysize(modifiers); ++i) {
+        if (changed & modifiers[i].mask) {
+            PS5_SendKey(modifiers[i].scancode, (current.modifiers & modifiers[i].mask) != 0);
         }
     }
-
-    for (int i = 0; i < 16; i++) {
-        if (g_prev_keyboard_state.scankey[i] == curr.scankey[i]) {
-            continue;
+    for (int i = 0; i < 16; ++i) {
+        const uint16_t old_key = previous_state.scankey[i];
+        const uint16_t new_key = current.scankey[i];
+        if (old_key && !PS5_KeyPresent(current.scankey, old_key)) {
+            PS5_SendKey((SDL_Scancode)old_key, false);
         }
-
-        if (g_prev_keyboard_state.scankey[i] == 0) {
-            SDL_SendKeyboardKey(SDL_PRESSED, curr.scankey[i]);
-        } else {
-            SDL_SendKeyboardKey(SDL_RELEASED, g_prev_keyboard_state.scankey[i]);
+        if (new_key && !PS5_KeyPresent(previous_state.scankey, new_key)) {
+            PS5_SendKey((SDL_Scancode)new_key, true);
         }
     }
-
-    memcpy(&g_prev_keyboard_state, &curr, sizeof(curr));
-
-    return 0;
+    previous_state = current;
 }
 
-SDL_bool PS5_HasScreenKeyboardSupport(_THIS)
+bool PS5_HasScreenKeyboardSupport(SDL_VideoDevice *_this)
 {
-    return SDL_TRUE;
+    (void)_this;
+    return true;
 }
 
-void PS5_ShowScreenKeyboard(_THIS, SDL_Window *window)
+void PS5_ShowScreenKeyboard(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
 {
-    memset(g_ime_dialog_text, 0, sizeof(g_ime_dialog_text));
-    sceImeDialogInit(&g_ime_dialog_param, NULL);
+    (void)_this;
+    (void)window;
+    (void)props;
+    SDL_memset(ime_text, 0, sizeof(ime_text));
+    if (sceImeDialogInit(&ime_param, NULL) != 0) {
+        SDL_SetError("sceImeDialogInit failed");
+    }
 }
 
-void PS5_HideScreenKeyboard(_THIS, SDL_Window *window)
+void PS5_HideScreenKeyboard(SDL_VideoDevice *_this, SDL_Window *window)
 {
-    if (g_ime_dialog_status == SCE_IME_DIALOG_STATUS_FINISHED) {
+    (void)_this;
+    (void)window;
+    if (ime_status != SCE_IME_DIALOG_STATUS_NONE) {
         sceImeDialogTerm();
+        ime_status = SCE_IME_DIALOG_STATUS_NONE;
+        SDL_SendScreenKeyboardHidden();
     }
-}
-
-SDL_bool PS5_IsScreenKeyboardShown(_THIS, SDL_Window *window)
-{
-    if (g_ime_dialog_status == SCE_IME_DIALOG_STATUS_RUNNING) {
-        return SDL_TRUE;
-    }
-
-    return SDL_FALSE;
 }
 
 #endif /* SDL_VIDEO_DRIVER_PS5 */
-
-/* vi: set ts=4 sw=4 expandtab: */

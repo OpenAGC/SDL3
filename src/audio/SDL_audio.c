@@ -71,6 +71,9 @@ static const AudioBootStrap *const bootstrap[] = {
 #ifdef SDL_AUDIO_DRIVER_PSP
     &PSPAUDIO_bootstrap,
 #endif
+#ifdef SDL_AUDIO_DRIVER_PS5
+    &PS5AUDIO_bootstrap,
+#endif
 #ifdef SDL_AUDIO_DRIVER_VITA
     &VITAAUD_bootstrap,
 #endif
@@ -2659,4 +2662,3 @@ void SDL_UpdateAudio(void)
         SDL_free(i);
     }
 }
-
